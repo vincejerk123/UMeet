@@ -37,15 +37,12 @@ class SvgReactionButton extends StatelessWidget {
     final content = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        AnimatedSwitcher(
-          duration: const Duration(milliseconds: 180),
-          transitionBuilder: (child, animation) => ScaleTransition(
-            scale: animation,
-            child: FadeTransition(opacity: animation, child: child),
-          ),
+        // Fixed-size wrapper prevents layout shifts when the SVG swaps
+        SizedBox(
+          width: iconSize,
+          height: iconSize,
           child: SvgPicture.asset(
             svgPath,
-            key: ValueKey('$svgPath-$active'),
             width: iconSize,
             height: iconSize,
             colorFilter: ColorFilter.mode(tint, BlendMode.srcIn),

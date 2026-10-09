@@ -6,6 +6,7 @@ import '../widgets/post_card.dart';
 import 'reply_screen.dart';
 import 'chat_screen.dart';
 import 'connections_screen.dart';
+import 'my_profile_screen.dart';
 
 class UserProfileScreen extends StatefulWidget {
   final String userId;
@@ -27,6 +28,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   String? _myFollowStatus;
   String? _theirFollowStatus;
   bool _hasConversation = false;
+  bool _iBlockedThem = false;
+  bool _theyBlockedMe = false;
+
   bool _loading = true;
   bool _busy = false;
 
@@ -62,12 +66,14 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     try {
       final uid = _client.auth.currentUser!.id;
 
+      // ─── Fetch profile ───
       final p = await _client
           .from('profiles')
           .select()
           .eq('id', widget.userId)
           .maybeSingle();
 
+      // ─── Posts ───
       final posts = await _client
           .from('posts_with_counts')
           .select(
@@ -76,6 +82,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           .eq('author_id', widget.userId)
           .order('created_at', ascending: false);
 
+      // ─── Followers of viewed user ───
       final followersData = await _client
           .from('follows')
           .select('follower_id')
@@ -85,6 +92,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           .map((r) => r['follower_id'] as String)
           .toSet();
 
+      // ─── People the viewed user follows ───
       final followingData = await _client
           .from('follows')
           .select('following_id')
@@ -96,6 +104,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
       final friendsCount = followerIds.intersection(followingIds).length;
 
+      // ─── My follow status toward them ───
       final mine = await _client
           .from('follows')
           .select('status')
@@ -103,6 +112,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           .eq('following_id', widget.userId)
           .maybeSingle();
 
+      // ─── Their follow status toward me ───
       final theirs = await _client
           .from('follows')
           .select('status')
@@ -110,6 +120,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           .eq('following_id', uid)
           .maybeSingle();
 
+      // ─── Existing conversation? ───
       final a = uid.compareTo(widget.userId) < 0 ? uid : widget.userId;
       final b = uid.compareTo(widget.userId) < 0 ? widget.userId : uid;
       final convo = await _client
@@ -119,6 +130,22 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           .eq('user_b', b)
           .maybeSingle();
 
+      // ─── Block status (both directions) ───
+      final iBlocked = await _client
+          .from('blocked_users')
+          .select()
+          .eq('blocker_id', uid)
+          .eq('blocked_id', widget.userId)
+          .maybeSingle();
+
+      final theyBlocked = await _client
+          .from('blocked_users')
+          .select()
+          .eq('blocker_id', widget.userId)
+          .eq('blocked_id', uid)
+          .maybeSingle();
+
+      // ─── Total likes ───
       int likes = 0;
       for (final post in posts) {
         likes += (post['like_count'] as num?)?.toInt() ?? 0;
@@ -134,6 +161,8 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         _myFollowStatus = mine?['status'] as String?;
         _theirFollowStatus = theirs?['status'] as String?;
         _hasConversation = convo != null;
+        _iBlockedThem = iBlocked != null;
+        _theyBlockedMe = theyBlocked != null;
         _loading = false;
       });
     } catch (e) {
@@ -147,6 +176,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   // ══════════════════════════════════════════════
   Future<void> _handleFollowTap() async {
     if (_busy) return;
+    if (_iBlockedThem || _theyBlockedMe) return;
     setState(() => _busy = true);
     final uid = _client.auth.currentUser!.id;
 
@@ -213,9 +243,145 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   }
 
   // ══════════════════════════════════════════════
-  //  Message flow (mutual required)
+  //  Block / Unblock
+  // ══════════════════════════════════════════════
+  void _showProfileMenu() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      backgroundColor: Colors.white,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 12),
+            if (_iBlockedThem)
+              ListTile(
+                leading: const Icon(Icons.lock_open_outlined),
+                title: const Text('Unblock user'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _unblockUser();
+                },
+              )
+            else
+              ListTile(
+                leading: const Icon(Icons.block, color: Colors.red),
+                title: const Text(
+                  'Block user',
+                  style: TextStyle(
+                    color: Colors.red,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _blockUser();
+                },
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _blockUser() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Block user?'),
+        content: Text(
+          'Blocking ${_profile?['display_name'] ?? 'this user'} will:'
+          '\n\n• Remove them from your feed'
+          '\n• Prevent them from messaging you'
+          '\n• Remove any existing friendship',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Block'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final uid = _client.auth.currentUser!.id;
+    try {
+      // Remove follow relationships in both directions
+      await _client
+          .from('follows')
+          .delete()
+          .or(
+            'and(follower_id.eq.$uid,following_id.eq.${widget.userId}),'
+            'and(follower_id.eq.${widget.userId},following_id.eq.$uid)',
+          );
+
+      // Insert block
+      await _client.from('blocked_users').insert({
+        'blocker_id': uid,
+        'blocked_id': widget.userId,
+      });
+
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Could not block: $e')));
+      }
+    }
+  }
+
+  Future<void> _unblockUser() async {
+    final uid = _client.auth.currentUser!.id;
+    try {
+      await _client
+          .from('blocked_users')
+          .delete()
+          .eq('blocker_id', uid)
+          .eq('blocked_id', widget.userId);
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Could not unblock: $e')));
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════
+  //  Message flow
   // ══════════════════════════════════════════════
   Future<void> _openChat() async {
+    // Block guard
+    if (_iBlockedThem || _theyBlockedMe) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Messaging is not available with this user.'),
+          ),
+        );
+      }
+      return;
+    }
+
     final uid = _client.auth.currentUser!.id;
 
     if (_hasConversation) {
@@ -324,6 +490,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   }
 
   String _followButtonLabel() {
+    if (_iBlockedThem || _theyBlockedMe) return 'Blocked';
     if (_myFollowStatus == 'pending') return 'Requested';
     if (_myFollowStatus == 'accepted') {
       return _mutual ? 'Friends' : 'Following';
@@ -333,6 +500,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   }
 
   Color _followButtonBg() {
+    if (_iBlockedThem || _theyBlockedMe) return Colors.grey.shade200;
     if (_myFollowStatus == 'accepted' && _mutual) {
       return AppColors.lightRed;
     }
@@ -354,6 +522,12 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   // ══════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
+    // If this is our own profile, show My Profile instead
+    final myId = _client.auth.currentUser?.id;
+    if (myId != null && myId == widget.userId) {
+      return const MyProfileScreen();
+    }
+
     return Scaffold(
       backgroundColor: AppColors.bg,
       body: SafeArea(
@@ -372,7 +546,42 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                       style: TextStyle(fontWeight: FontWeight.w600),
                     ),
                     centerTitle: true,
+                    actions: [
+                      IconButton(
+                        onPressed: _showProfileMenu,
+                        icon: const Icon(Icons.more_vert),
+                      ),
+                    ],
                   ),
+
+                  // ─── Block banner ───
+                  if (_iBlockedThem)
+                    Container(
+                      color: Colors.grey.shade200,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.block,
+                            size: 16,
+                            color: Colors.grey.shade700,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            'You blocked this user',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey.shade700,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
                   Expanded(
                     child: ListView(
                       children: [
@@ -381,7 +590,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                           padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
                           child: Column(
                             children: [
-                              // ─── Avatar ─────────────
+                              // ─── Avatar ───
                               CircleAvatar(
                                 radius: 52,
                                 backgroundColor: Colors.grey.shade300,
@@ -398,7 +607,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                               ),
                               const SizedBox(height: 12),
 
-                              // ─── Name ───────────────
+                              // ─── Name ───
                               Text(
                                 _profile?['display_name'] ?? 'User',
                                 style: const TextStyle(
@@ -409,7 +618,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                               ),
                               const SizedBox(height: 6),
 
-                              // ─── Year + Program ─────
+                              // ─── Year + Program ───
                               Text(
                                 _yearLabel(_profile?['year_level']),
                                 style: TextStyle(
@@ -430,7 +639,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
                               const SizedBox(height: 20),
 
-                              // ─── Stats ──────────────
+                              // ─── Stats ───
                               Row(
                                 children: [
                                   Expanded(
@@ -460,7 +669,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
                               const SizedBox(height: 20),
 
-                              // ─── Actions ────────────
+                              // ─── Actions ───
                               Row(
                                 children: [
                                   Expanded(
@@ -469,7 +678,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                         horizontal: 6,
                                       ),
                                       child: OutlinedButton(
-                                        onPressed: _busy
+                                        onPressed:
+                                            (_busy ||
+                                                _iBlockedThem ||
+                                                _theyBlockedMe)
                                             ? null
                                             : _handleFollowTap,
                                         style: OutlinedButton.styleFrom(
@@ -515,6 +727,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                 builder: (_) => ReplyScreen(post: p),
                               ),
                             ),
+                            onRemoved: () => _load(),
                           ),
                         ),
                       ],
@@ -527,9 +740,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   }
 
   Widget _buildMessageButton() {
-    final canMessage = _mutual || _hasConversation;
+    final blocked = _iBlockedThem || _theyBlockedMe;
+    final canMessage = !blocked && (_mutual || _hasConversation);
     return OutlinedButton(
-      onPressed: _openChat,
+      onPressed: blocked ? null : _openChat,
       style: OutlinedButton.styleFrom(
         padding: const EdgeInsets.symmetric(vertical: 10),
         side: BorderSide(
@@ -551,9 +765,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     );
   }
 
-  // ══════════════════════════════════════════════
-  //  Stat helpers (no underline, equal width)
-  // ══════════════════════════════════════════════
   Widget _stat(String value, String label) {
     return Column(
       mainAxisSize: MainAxisSize.min,

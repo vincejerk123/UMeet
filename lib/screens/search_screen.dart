@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../theme.dart';
+import '../utils/transitions.dart';
 import '../widgets/post_card.dart';
 import 'reply_screen.dart';
 import 'my_profile_screen.dart';
@@ -21,13 +22,8 @@ class _SearchScreenState extends State<SearchScreen> {
   final _q = TextEditingController();
 
   SearchMode _mode = SearchMode.posts;
-
-  // Posts state
   List<Map<String, dynamic>> _postResults = [];
-
-  // People state
   List<Map<String, dynamic>> _peopleResults = [];
-
   String? _myAvatarUrl;
   bool _loading = false;
 
@@ -54,23 +50,41 @@ class _SearchScreenState extends State<SearchScreen> {
     if (mounted) setState(() => _myAvatarUrl = data?['avatar_url']);
   }
 
-  // ─────────────────────────────────────────────
-  //  Router: decide posts or people
-  // ─────────────────────────────────────────────
-  Future<void> _search(String query) async {
+  Future<Set<String>> _fetchBlockedIds(String uid) async {
+    final rows = await _client
+        .from('blocked_users')
+        .select('blocker_id, blocked_id')
+        .or('blocker_id.eq.$uid,blocked_id.eq.$uid');
+    final ids = <String>{};
+    for (final row in rows as List) {
+      ids.add(
+        row['blocker_id'] == uid
+            ? row['blocked_id'] as String
+            : row['blocker_id'] as String,
+      );
+    }
+    return ids;
+  }
+
+  Future<void> _refresh() async {
+    await _search(_q.text, silent: true);
+  }
+
+  Future<void> _search(String query, {bool silent = false}) async {
+    if (!silent) setState(() => _loading = true);
     if (_mode == SearchMode.posts) {
       await _searchPosts(query);
     } else {
       await _searchPeople(query);
     }
+    if (silent && mounted) setState(() => _loading = false);
   }
 
   Future<void> _searchPosts(String query) async {
-    setState(() => _loading = true);
     try {
       final uid = _client.auth.currentUser!.id;
+      final blockedIds = await _fetchBlockedIds(uid);
 
-      // Fetch hidden post IDs
       final hiddenRows = await _client
           .from('hidden_posts')
           .select('post_id')
@@ -88,11 +102,13 @@ class _SearchScreenState extends State<SearchScreen> {
       if (hiddenIds.isNotEmpty) {
         q = q.not('id', 'in', '(${hiddenIds.join(',')})');
       }
+      if (blockedIds.isNotEmpty) {
+        q = q.not('author_id', 'in', '(${blockedIds.join(',')})');
+      }
       if (query.trim().isNotEmpty) {
         q = q.textSearch('search_vector', query.trim(), config: 'english');
       }
 
-      // Fixed sort: newest first
       final data = await q.order('created_at', ascending: false).limit(50);
 
       if (mounted) {
@@ -108,9 +124,9 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Future<void> _searchPeople(String query) async {
-    setState(() => _loading = true);
     try {
       final uid = _client.auth.currentUser!.id;
+      final blockedIds = await _fetchBlockedIds(uid);
       final trimmed = query.trim();
 
       var q = _client
@@ -118,19 +134,20 @@ class _SearchScreenState extends State<SearchScreen> {
           .select('id, display_name, avatar_url, program, year_level')
           .neq('id', uid);
 
+      if (blockedIds.isNotEmpty) {
+        q = q.not('id', 'in', '(${blockedIds.join(',')})');
+      }
       if (trimmed.isNotEmpty) {
         q = q.ilike('display_name', '%$trimmed%');
       }
 
       final data = await q.order('display_name').limit(50);
-
       final seen = <String>{};
       final list = <Map<String, dynamic>>[];
       for (final row in data) {
         final id = row['id'] as String;
         if (seen.add(id)) list.add(Map<String, dynamic>.from(row));
       }
-
       if (mounted) {
         setState(() {
           _peopleResults = list;
@@ -160,7 +177,6 @@ class _SearchScreenState extends State<SearchScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // ─── Header ─────────────────────────────
             Container(
               color: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -183,9 +199,7 @@ class _SearchScreenState extends State<SearchScreen> {
                     onTap: () async {
                       await Navigator.push(
                         context,
-                        MaterialPageRoute(
-                          builder: (_) => const MyProfileScreen(),
-                        ),
+                        slideInRoute(const MyProfileScreen()),
                       );
                       _loadMyAvatar();
                     },
@@ -207,10 +221,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 ],
               ),
             ),
-
             const SizedBox(height: 8),
-
-            // ─── Page title ─────────────────────────
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Align(
@@ -224,10 +235,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 ),
               ),
             ),
-
             const SizedBox(height: 12),
-
-            // ─── Search bar ─────────────────────────
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: TextField(
@@ -251,10 +259,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 ),
               ),
             ),
-
             const SizedBox(height: 12),
-
-            // ─── Posts / People toggle ─────────────
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Row(
@@ -265,10 +270,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 ],
               ),
             ),
-
             const SizedBox(height: 12),
-
-            // ─── Results ────────────────────────────
             Expanded(
               child: _loading
                   ? const Center(child: CircularProgressIndicator())
@@ -284,53 +286,72 @@ class _SearchScreenState extends State<SearchScreen> {
 
   Widget _buildPostsResults() {
     if (_postResults.isEmpty) {
-      return const Center(child: Text('No results found.'));
+      return RefreshIndicator(
+        onRefresh: _refresh,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 150),
+            Center(child: Text('No results found.')),
+          ],
+        ),
+      );
     }
-    return ListView.builder(
-      itemCount: _postResults.length,
-      itemBuilder: (_, i) {
-        final p = _postResults[i];
-        return PostCard(
-          key: ValueKey(p['id']),
-          post: p,
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => ReplyScreen(post: p)),
-          ),
-          onRemoved: () {
-            Future.microtask(() {
-              if (mounted) setState(() => _postResults.removeAt(i));
-            });
-          },
-        );
-      },
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        itemCount: _postResults.length,
+        itemBuilder: (_, i) {
+          final p = _postResults[i];
+          return PostCard(
+            key: ValueKey(p['id']),
+            post: p,
+            onTap: () =>
+                Navigator.push(context, smoothOpenRoute(ReplyScreen(post: p))),
+            onRemoved: () {
+              Future.microtask(() {
+                if (mounted) _search(_q.text, silent: true);
+              });
+            },
+          );
+        },
+      ),
     );
   }
 
   Widget _buildPeopleResults() {
     if (_peopleResults.isEmpty) {
-      return const Center(child: Text('No people found.'));
+      return RefreshIndicator(
+        onRefresh: _refresh,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 150),
+            Center(child: Text('No people found.')),
+          ],
+        ),
+      );
     }
-    return ListView.builder(
-      itemCount: _peopleResults.length,
-      itemBuilder: (_, i) {
-        final p = _peopleResults[i];
-        return _PersonTile(
-          profile: p,
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => UserProfileScreen(userId: p['id']),
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        itemCount: _peopleResults.length,
+        itemBuilder: (_, i) {
+          final p = _peopleResults[i];
+          return _PersonTile(
+            profile: p,
+            onTap: () => Navigator.push(
+              context,
+              slideInRoute(UserProfileScreen(userId: p['id'])),
             ),
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 
-  // ══════════════════════════════════════════════
-  //  Mode chip
-  // ══════════════════════════════════════════════
   Widget _modeChip(String label, SearchMode mode) {
     final selected = _mode == mode;
     return GestureDetector(
@@ -357,9 +378,6 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 }
 
-// ══════════════════════════════════════════════
-//  Person tile
-// ══════════════════════════════════════════════
 class _PersonTile extends StatelessWidget {
   final Map<String, dynamic> profile;
   final VoidCallback onTap;

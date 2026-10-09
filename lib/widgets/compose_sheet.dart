@@ -7,7 +7,11 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../theme.dart';
 import 'svg_icon_button.dart';
 
-Future<bool?> showComposeSheet(BuildContext context, {String? fixedTopicSlug}) {
+Future<bool?> showComposeSheet(
+  BuildContext context, {
+  String? fixedTopicSlug,
+  Map<String, dynamic>? existingPost,
+}) {
   return showModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
@@ -16,13 +20,17 @@ Future<bool?> showComposeSheet(BuildContext context, {String? fixedTopicSlug}) {
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
-    builder: (_) => _ComposeSheet(fixedTopicSlug: fixedTopicSlug),
+    builder: (_) => _ComposeSheet(
+      fixedTopicSlug: fixedTopicSlug,
+      existingPost: existingPost,
+    ),
   );
 }
 
 class _ComposeSheet extends StatefulWidget {
   final String? fixedTopicSlug;
-  const _ComposeSheet({this.fixedTopicSlug});
+  final Map<String, dynamic>? existingPost;
+  const _ComposeSheet({this.fixedTopicSlug, this.existingPost});
 
   @override
   State<_ComposeSheet> createState() => _ComposeSheetState();
@@ -35,14 +43,28 @@ class _ComposeSheetState extends State<_ComposeSheet> {
   final _picker = ImagePicker();
 
   List<File> _images = [];
+  List<String> _existingImageUrls = [];
   List<Map<String, dynamic>> _topics = [];
   String? _selectedTopicId;
   bool _posting = false;
   bool _showSuggestions = false;
 
+  bool get _isEdit => widget.existingPost != null;
+
   @override
   void initState() {
     super.initState();
+    final p = widget.existingPost;
+    if (p != null) {
+      _body.text = (p['body'] ?? '').toString();
+      final topic = p['topics'] as Map<String, dynamic>?;
+      if (topic != null) {
+        _topicController.text = (topic['name'] as String?) ?? '';
+      }
+      _selectedTopicId = p['topic_id'] as String?;
+      _existingImageUrls = ((p['image_urls'] as List?)?.cast<String>() ?? [])
+          .toList();
+    }
     _loadTopics();
   }
 
@@ -59,7 +81,7 @@ class _ComposeSheetState extends State<_ComposeSheet> {
     if (!mounted) return;
     setState(() {
       _topics = List<Map<String, dynamic>>.from(data);
-      if (widget.fixedTopicSlug != null) {
+      if (widget.fixedTopicSlug != null && !_isEdit) {
         final match = _topics.firstWhere(
           (t) => t['slug'] == widget.fixedTopicSlug,
           orElse: () => {},
@@ -101,14 +123,12 @@ class _ComposeSheetState extends State<_ComposeSheet> {
   Future<String> _resolveTopicId(String name) async {
     final client = Supabase.instance.client;
     final trimmed = name.trim();
-
     final existing = await client
         .from('topics')
         .select()
         .ilike('name', trimmed)
         .maybeSingle();
     if (existing != null) return existing['id'] as String;
-
     final slug = _slugify(trimmed);
     final bySlug = await client
         .from('topics')
@@ -116,7 +136,6 @@ class _ComposeSheetState extends State<_ComposeSheet> {
         .eq('slug', slug)
         .maybeSingle();
     if (bySlug != null) return bySlug['id'] as String;
-
     final created = await client
         .from('topics')
         .insert({'name': trimmed, 'slug': slug})
@@ -133,7 +152,6 @@ class _ComposeSheetState extends State<_ComposeSheet> {
   Future<void> _submit() async {
     final bodyText = _body.text.trim();
     final topicName = _topicController.text.trim();
-
     if (bodyText.isEmpty) {
       ScaffoldMessenger.of(
         context,
@@ -149,24 +167,37 @@ class _ComposeSheetState extends State<_ComposeSheet> {
     setState(() => _posting = true);
     final client = Supabase.instance.client;
     final user = client.auth.currentUser!;
-
     try {
       final topicId = _selectedTopicId ?? await _resolveTopicId(topicName);
 
-      final urls = <String>[];
+      final newUrls = <String>[];
       for (final img in _images) {
         final path =
             'posts/${user.id}/${DateTime.now().microsecondsSinceEpoch}.jpg';
         await client.storage.from('posts').upload(path, img);
-        urls.add(client.storage.from('posts').getPublicUrl(path));
+        newUrls.add(client.storage.from('posts').getPublicUrl(path));
       }
 
-      await client.from('posts').insert({
-        'topic_id': topicId,
-        'author_id': user.id,
-        'body': bodyText,
-        'image_urls': urls,
-      });
+      final allUrls = [..._existingImageUrls, ...newUrls];
+
+      if (_isEdit) {
+        await client
+            .from('posts')
+            .update({
+              'topic_id': topicId,
+              'body': bodyText,
+              'image_urls': allUrls,
+              'updated_at': DateTime.now().toUtc().toIso8601String(),
+            })
+            .eq('id', widget.existingPost!['id']);
+      } else {
+        await client.from('posts').insert({
+          'topic_id': topicId,
+          'author_id': user.id,
+          'body': bodyText,
+          'image_urls': allUrls,
+        });
+      }
 
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
@@ -182,7 +213,6 @@ class _ComposeSheetState extends State<_ComposeSheet> {
   @override
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
-
     return Padding(
       padding: EdgeInsets.only(bottom: bottomInset),
       child: SingleChildScrollView(
@@ -194,9 +224,12 @@ class _ComposeSheetState extends State<_ComposeSheet> {
             children: [
               Row(
                 children: [
-                  const Text(
-                    'Create post',
-                    style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+                  Text(
+                    _isEdit ? 'Edit post' : 'Create post',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 16,
+                    ),
                   ),
                   const Spacer(),
                   IconButton(
@@ -205,7 +238,6 @@ class _ComposeSheetState extends State<_ComposeSheet> {
                   ),
                 ],
               ),
-
               TextField(
                 controller: _body,
                 maxLines: null,
@@ -217,7 +249,52 @@ class _ComposeSheetState extends State<_ComposeSheet> {
                   border: InputBorder.none,
                 ),
               ),
-
+              // Existing images (edit mode)
+              if (_existingImageUrls.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 80,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: _existingImageUrls.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 8),
+                    itemBuilder: (_, i) => Stack(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.network(
+                            _existingImageUrls[i],
+                            width: 80,
+                            height: 80,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                        Positioned(
+                          right: 0,
+                          top: 0,
+                          child: GestureDetector(
+                            onTap: () =>
+                                setState(() => _existingImageUrls.removeAt(i)),
+                            child: Container(
+                              decoration: const BoxDecoration(
+                                color: Colors.black54,
+                                shape: BoxShape.circle,
+                              ),
+                              padding: const EdgeInsets.all(2),
+                              child: const Icon(
+                                Icons.close,
+                                size: 14,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+              // New images
               if (_images.isNotEmpty) ...[
                 const SizedBox(height: 8),
                 SizedBox(
@@ -261,9 +338,7 @@ class _ComposeSheetState extends State<_ComposeSheet> {
                   ),
                 ),
               ],
-
               const SizedBox(height: 12),
-
               TextField(
                 controller: _topicController,
                 focusNode: _topicFocus,
@@ -291,12 +366,8 @@ class _ComposeSheetState extends State<_ComposeSheet> {
                 }),
                 onTap: () => setState(() => _showSuggestions = true),
               ),
-
               if (_showSuggestions) _buildSuggestions(),
-
               const SizedBox(height: 12),
-
-              // ─── Action bar with SVG send ───
               Row(
                 children: [
                   IconButton(
@@ -321,7 +392,7 @@ class _ComposeSheetState extends State<_ComposeSheet> {
                       disabledColor: Colors.grey.shade400,
                       onPressed: _canPost ? _submit : null,
                       padding: const EdgeInsets.all(10),
-                      semanticLabel: 'Post',
+                      semanticLabel: _isEdit ? 'Save' : 'Post',
                     ),
                 ],
               ),
@@ -336,7 +407,6 @@ class _ComposeSheetState extends State<_ComposeSheet> {
     final matches = _filteredTopics;
     final showCreate = _needsNewTopic;
     if (matches.isEmpty && !showCreate) return const SizedBox.shrink();
-
     return Container(
       margin: const EdgeInsets.only(top: 4),
       constraints: const BoxConstraints(maxHeight: 180),

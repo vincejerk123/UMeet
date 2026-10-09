@@ -5,10 +5,12 @@ import 'package:timeago/timeago.dart' as timeago;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../theme.dart';
+import '../utils/transitions.dart';
 import '../screens/image_viewer_screen.dart';
 import '../screens/user_profile_screen.dart';
 import '../screens/my_profile_screen.dart';
 import '../screens/reply_screen.dart';
+import 'compose_sheet.dart';
 
 enum PostImageLayout { compact, large }
 
@@ -37,21 +39,24 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
 
   late int _likeCount;
   late int _dislikeCount;
+  late int _viewCount;
   int _myVote = 0;
   bool _busy = false;
 
   late AnimationController _likeBounce;
   late AnimationController _dislikeBounce;
+  late AnimationController _heartPop;
   late Animation<double> _likeScale;
   late Animation<double> _dislikeScale;
+  late Animation<double> _heartScale;
+  late Animation<double> _heartOpacity;
 
   bool get _isMine => widget.post['author_id'] == _client.auth.currentUser?.id;
 
   @override
   void initState() {
     super.initState();
-    _likeCount = (widget.post['like_count'] as num?)?.toInt() ?? 0;
-    _dislikeCount = (widget.post['dislike_count'] as num?)?.toInt() ?? 0;
+    _syncFromPost();
 
     _likeBounce = AnimationController(
       vsync: this,
@@ -61,34 +66,93 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
       vsync: this,
       duration: const Duration(milliseconds: 250),
     );
+    _heartPop = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    );
+
     _likeScale = TweenSequence<double>([
-      TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.35), weight: 50),
-      TweenSequenceItem(tween: Tween(begin: 1.35, end: 1.0), weight: 50),
-    ]).animate(CurvedAnimation(parent: _likeBounce, curve: Curves.easeOutBack));
-    _dislikeScale =
-        TweenSequence<double>([
-          TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.35), weight: 50),
-          TweenSequenceItem(tween: Tween(begin: 1.35, end: 1.0), weight: 50),
-        ]).animate(
-          CurvedAnimation(parent: _dislikeBounce, curve: Curves.easeOutBack),
-        );
+      TweenSequenceItem(
+        tween: Tween(
+          begin: 1.0,
+          end: 1.35,
+        ).chain(CurveTween(curve: Curves.easeOutCubic)),
+        weight: 50,
+      ),
+      TweenSequenceItem(
+        tween: Tween(
+          begin: 1.35,
+          end: 1.0,
+        ).chain(CurveTween(curve: Curves.easeOutCubic)),
+        weight: 50,
+      ),
+    ]).animate(_likeBounce);
+
+    _dislikeScale = TweenSequence<double>([
+      TweenSequenceItem(
+        tween: Tween(
+          begin: 1.0,
+          end: 1.35,
+        ).chain(CurveTween(curve: Curves.easeOutCubic)),
+        weight: 50,
+      ),
+      TweenSequenceItem(
+        tween: Tween(
+          begin: 1.35,
+          end: 1.0,
+        ).chain(CurveTween(curve: Curves.easeOutCubic)),
+        weight: 50,
+      ),
+    ]).animate(_dislikeBounce);
+
+    _heartScale = TweenSequence<double>([
+      TweenSequenceItem(
+        tween: Tween(
+          begin: 0.4,
+          end: 1.25,
+        ).chain(CurveTween(curve: Curves.easeOutCubic)),
+        weight: 45,
+      ),
+      TweenSequenceItem(
+        tween: Tween(
+          begin: 1.25,
+          end: 1.0,
+        ).chain(CurveTween(curve: Curves.easeOutCubic)),
+        weight: 25,
+      ),
+      TweenSequenceItem(tween: ConstantTween(1.0), weight: 30),
+    ]).animate(_heartPop);
+
+    _heartOpacity = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 0.0, end: 1.0), weight: 20),
+      TweenSequenceItem(tween: ConstantTween(1.0), weight: 55),
+      TweenSequenceItem(tween: Tween(begin: 1.0, end: 0.0), weight: 25),
+    ]).animate(_heartPop);
 
     _loadMyVote();
+  }
+
+  void _syncFromPost() {
+    _likeCount = (widget.post['like_count'] as num?)?.toInt() ?? 0;
+    _dislikeCount = (widget.post['dislike_count'] as num?)?.toInt() ?? 0;
+    _viewCount = (widget.post['view_count'] as num?)?.toInt() ?? 0;
   }
 
   @override
   void dispose() {
     _likeBounce.dispose();
     _dislikeBounce.dispose();
+    _heartPop.dispose();
     super.dispose();
   }
 
   @override
   void didUpdateWidget(covariant PostCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.post['id'] != widget.post['id']) {
-      _likeCount = (widget.post['like_count'] as num?)?.toInt() ?? 0;
-      _dislikeCount = (widget.post['dislike_count'] as num?)?.toInt() ?? 0;
+    if (oldWidget.post['id'] != widget.post['id'] ||
+        oldWidget.post['like_count'] != widget.post['like_count'] ||
+        oldWidget.post['view_count'] != widget.post['view_count']) {
+      _syncFromPost();
       _myVote = 0;
       _loadMyVote();
     }
@@ -108,6 +172,14 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
         setState(() => _myVote = (data['value'] as num).toInt());
       }
     } catch (_) {}
+  }
+
+  void _handleDoubleTap() {
+    _heartPop.forward(from: 0);
+    HapticFeedback.mediumImpact();
+    if (_myVote != 1) {
+      _toggleVote(1);
+    }
   }
 
   Future<void> _toggleVote(int value) async {
@@ -171,30 +243,17 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
     final authorId = widget.post['author_id'] as String?;
     final myId = _client.auth.currentUser?.id;
     if (authorId == null) return;
-
     if (authorId == myId) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => const MyProfileScreen()),
-      );
+      Navigator.push(context, slideInRoute(const MyProfileScreen()));
       return;
     }
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => UserProfileScreen(userId: authorId)),
-    );
+    Navigator.push(context, slideInRoute(UserProfileScreen(userId: authorId)));
   }
 
   void _openReplies() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => ReplyScreen(post: widget.post)),
-    );
+    Navigator.push(context, smoothOpenRoute(ReplyScreen(post: widget.post)));
   }
 
-  // ══════════════════════════════════════════════
-  //  3-dot menu
-  // ══════════════════════════════════════════════
   void _openMenu() {
     showModalBottomSheet(
       context: context,
@@ -215,7 +274,21 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
-            if (_isMine)
+            if (_isMine) ...[
+              ListTile(
+                leading: const Icon(Icons.edit_outlined),
+                title: const Text('Edit post'),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  final ok = await showComposeSheet(
+                    context,
+                    existingPost: widget.post,
+                  );
+                  if (ok == true) {
+                    widget.onRemoved?.call();
+                  }
+                },
+              ),
               ListTile(
                 leading: const Icon(Icons.delete_outline, color: Colors.red),
                 title: const Text(
@@ -229,8 +302,8 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
                   Navigator.pop(ctx);
                   _confirmDelete();
                 },
-              )
-            else ...[
+              ),
+            ] else ...[
               ListTile(
                 leading: const Icon(Icons.visibility_off_outlined),
                 title: const Text('Hide this post'),
@@ -281,7 +354,6 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
       ),
     );
     if (confirmed != true) return;
-
     try {
       await _client.from('posts').delete().eq('id', widget.post['id']);
       widget.onRemoved?.call();
@@ -310,9 +382,6 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
     }
   }
 
-  // ══════════════════════════════════════════════
-  //  Build
-  // ══════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
     final post = widget.post;
@@ -327,146 +396,245 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
     final time = created != null
         ? timeago.format(DateTime.parse(created.toString()).toLocal())
         : '';
-
     final heroPrefix = 'post-${post['id']}-${widget.imageLayout.name}';
+    final isEdited =
+        post['updated_at'] != null && post['updated_at'] != post['created_at'];
 
     return GestureDetector(
       onTap: widget.onTap,
+      onDoubleTap: _handleDoubleTap,
       behavior: HitTestBehavior.opaque,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          border: Border(bottom: BorderSide(color: Color(0xFFEEEEEE))),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // ─── Header row ─────────────────────────
-            Row(
+      child: Stack(
+        children: [
+          Container(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              border: Border(bottom: BorderSide(color: Color(0xFFEEEEEE))),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: GestureDetector(
-                    onTap: _openAuthor,
-                    behavior: HitTestBehavior.opaque,
-                    child: Row(
-                      children: [
-                        CircleAvatar(
-                          radius: 18,
-                          backgroundColor: Colors.grey.shade300,
-                          backgroundImage: profile['avatar_url'] != null
-                              ? NetworkImage(profile['avatar_url'])
-                              : null,
-                          child: profile['avatar_url'] == null
-                              ? const Icon(
-                                  Icons.person,
-                                  size: 18,
-                                  color: Colors.white,
-                                )
-                              : null,
-                        ),
-                        const SizedBox(width: 10),
-                        Flexible(
-                          child: Text(
-                            name,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w600,
-                              fontSize: 13,
+                Row(
+                  children: [
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: _openAuthor,
+                        behavior: HitTestBehavior.opaque,
+                        child: Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 18,
+                              backgroundColor: Colors.grey.shade300,
+                              backgroundImage: profile['avatar_url'] != null
+                                  ? NetworkImage(profile['avatar_url'])
+                                  : null,
+                              child: profile['avatar_url'] == null
+                                  ? const Icon(
+                                      Icons.person,
+                                      size: 18,
+                                      color: Colors.white,
+                                    )
+                                  : null,
                             ),
-                          ),
+                            const SizedBox(width: 10),
+                            Flexible(
+                              child: Text(
+                                name,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              '· um/${topic['slug'] ?? 'general'}',
+                              style: TextStyle(
+                                color: Colors.grey.shade600,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
                         ),
-                        const SizedBox(width: 6),
-                        Text(
-                          '· um/${topic['slug'] ?? 'general'}',
-                          style: TextStyle(
-                            color: Colors.grey.shade600,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
-                  ),
+                    if (isEdited)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 4),
+                        child: Text(
+                          'edited',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: Colors.grey.shade500,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      ),
+                    Text(
+                      time,
+                      style: TextStyle(
+                        color: Colors.grey.shade500,
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    GestureDetector(
+                      onTap: _openMenu,
+                      behavior: HitTestBehavior.opaque,
+                      child: Padding(
+                        padding: const EdgeInsets.all(4),
+                        child: Icon(
+                          Icons.more_horiz,
+                          size: 18,
+                          color: Colors.grey.shade600,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                Text(
-                  time,
-                  style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
-                ),
-                const SizedBox(width: 4),
-                GestureDetector(
-                  onTap: _openMenu,
-                  behavior: HitTestBehavior.opaque,
-                  child: Padding(
-                    padding: const EdgeInsets.all(4),
-                    child: Icon(
-                      Icons.more_horiz,
-                      size: 18,
+                if ((post['body'] ?? '').toString().isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(post['body'], style: const TextStyle(fontSize: 13)),
+                ],
+                if (images.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  widget.imageLayout == PostImageLayout.compact
+                      ? _buildCompactImages(context, images, heroPrefix)
+                      : _buildLargeImages(context, images, heroPrefix),
+                ],
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    _svgReaction(
+                      path: _myVote == 1
+                          ? 'assets/icons/like_filled.svg'
+                          : 'assets/icons/like_outline.svg',
+                      count: _likeCount,
+                      active: _myVote == 1,
+                      activeColor: AppColors.red,
+                      onTap: () => _toggleVote(1),
+                      scale: _likeScale,
+                    ),
+                    const SizedBox(width: 14),
+                    _svgReaction(
+                      path: _myVote == -1
+                          ? 'assets/icons/dislike_filled.svg'
+                          : 'assets/icons/dislike_outline.svg',
+                      count: _dislikeCount,
+                      active: _myVote == -1,
+                      activeColor: Colors.blueGrey,
+                      onTap: () => _toggleVote(-1),
+                      scale: _dislikeScale,
+                    ),
+                    const SizedBox(width: 14),
+                    _svgReaction(
+                      path: 'assets/icons/reply.svg',
+                      count: replies,
+                      active: false,
+                      activeColor: AppColors.red,
+                      onTap: _openReplies,
+                    ),
+                    const Spacer(),
+                    Icon(
+                      Icons.visibility_outlined,
+                      size: 15,
                       color: Colors.grey.shade600,
                     ),
-                  ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '$_viewCount',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
-
-            // ─── Body text ──────────────────────────
-            if ((post['body'] ?? '').toString().isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Text(post['body'], style: const TextStyle(fontSize: 13)),
-            ],
-
-            // ─── Images ─────────────────────────────
-            if (images.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              widget.imageLayout == PostImageLayout.compact
-                  ? _buildCompactImages(context, images, heroPrefix)
-                  : _buildLargeImages(context, images, heroPrefix),
-            ],
-
-            const SizedBox(height: 6),
-
-            // ─── Action row (SVG icons) ─────────────
-            Row(
-              children: [
-                _SvgReactionButton(
-                  scale: _likeScale,
-                  svgPath: _myVote == 1
-                      ? 'assets/icons/like_filled.svg'
-                      : 'assets/icons/like_outline.svg',
-                  count: _likeCount,
-                  active: _myVote == 1,
-                  activeColor: AppColors.red,
-                  onTap: () => _toggleVote(1),
+          ),
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Center(
+                child: AnimatedBuilder(
+                  animation: _heartPop,
+                  builder: (_, __) {
+                    final opacity = _heartOpacity.value.clamp(0.0, 1.0);
+                    if (opacity <= 0.001) return const SizedBox.shrink();
+                    return Opacity(
+                      opacity: opacity,
+                      child: Transform.scale(
+                        scale: _heartScale.value,
+                        child: const Icon(
+                          Icons.favorite,
+                          color: Color(0xFFC62828),
+                          size: 96,
+                        ),
+                      ),
+                    );
+                  },
                 ),
-                const SizedBox(width: 20),
-                _SvgReactionButton(
-                  scale: _dislikeScale,
-                  svgPath: _myVote == -1
-                      ? 'assets/icons/dislike_filled.svg'
-                      : 'assets/icons/dislike_outline.svg',
-                  count: _dislikeCount,
-                  active: _myVote == -1,
-                  activeColor: Colors.blueGrey,
-                  onTap: () => _toggleVote(-1),
-                ),
-                const SizedBox(width: 20),
-                _SvgReactionButton(
-                  svgPath: 'assets/icons/comment.svg',
-                  count: replies,
-                  active: false,
-                  activeColor: AppColors.red,
-                  onTap: _openReplies,
-                ),
-              ],
+              ),
             ),
-          ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _svgReaction({
+    required String path,
+    required int count,
+    required bool active,
+    required Color activeColor,
+    required VoidCallback onTap,
+    Animation<double>? scale,
+  }) {
+    final tint = active ? activeColor : Colors.grey.shade600;
+    final content = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: 20,
+          height: 20,
+          child: SvgPicture.asset(
+            path,
+            width: 20,
+            height: 20,
+            colorFilter: ColorFilter.mode(tint, BlendMode.srcIn),
+          ),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          '$count',
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+            color: tint,
+          ),
+        ),
+      ],
+    );
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        splashColor: activeColor.withOpacity(0.12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+          child: scale != null
+              ? ScaleTransition(scale: scale, child: content)
+              : content,
         ),
       ),
     );
   }
 
-  // ══════════════════════════════════════════════
-  //  Image builders (unchanged)
-  // ══════════════════════════════════════════════
   Widget _buildCompactImages(
     BuildContext context,
     List<String> images,
@@ -503,7 +671,6 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
     String heroPrefix,
   ) {
     final screenWidth = MediaQuery.of(context).size.width;
-
     if (images.length == 1) {
       return GestureDetector(
         onTap: () => _openViewer(context, images, 0, heroPrefix),
@@ -523,7 +690,6 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
         ),
       );
     }
-
     final cardWidth = screenWidth * 0.78;
     return SizedBox(
       height: 260,
@@ -558,16 +724,12 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
   ) {
     Navigator.push(
       context,
-      PageRouteBuilder(
-        opaque: false,
-        barrierColor: Colors.black,
-        pageBuilder: (_, __, ___) => ImageViewerScreen(
+      fadeScaleRoute(
+        ImageViewerScreen(
           images: images,
           initialIndex: i,
           heroTagPrefix: heroPrefix,
         ),
-        transitionsBuilder: (_, animation, __, child) =>
-            FadeTransition(opacity: animation, child: child),
       ),
     );
   }
@@ -603,77 +765,6 @@ class _PostCardState extends State<PostCard> with TickerProviderStateMixin {
         height: height,
         color: Colors.grey.shade200,
         child: const Icon(Icons.broken_image, color: Colors.grey),
-      ),
-    );
-  }
-}
-
-// ════════════════════════════════════════════════════
-//  SVG-based reaction button
-// ════════════════════════════════════════════════════
-class _SvgReactionButton extends StatelessWidget {
-  final String svgPath;
-  final int count;
-  final bool active;
-  final Color activeColor;
-  final VoidCallback onTap;
-  final Animation<double>? scale;
-
-  const _SvgReactionButton({
-    required this.svgPath,
-    required this.count,
-    required this.active,
-    required this.activeColor,
-    required this.onTap,
-    this.scale,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final iconColor = active ? activeColor : Colors.grey.shade600;
-
-    final content = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        AnimatedSwitcher(
-          duration: const Duration(milliseconds: 180),
-          transitionBuilder: (child, animation) => ScaleTransition(
-            scale: animation,
-            child: FadeTransition(opacity: animation, child: child),
-          ),
-          child: SvgPicture.asset(
-            svgPath,
-            key: ValueKey('$svgPath-$active'),
-            width: 20,
-            height: 20,
-            colorFilter: ColorFilter.mode(iconColor, BlendMode.srcIn),
-          ),
-        ),
-        const SizedBox(width: 6),
-        Text(
-          '$count',
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: active ? FontWeight.w600 : FontWeight.w500,
-            color: iconColor,
-          ),
-        ),
-      ],
-    );
-
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(20),
-        splashColor: activeColor.withOpacity(0.12),
-        highlightColor: activeColor.withOpacity(0.06),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
-          child: scale != null
-              ? ScaleTransition(scale: scale!, child: content)
-              : content,
-        ),
       ),
     );
   }

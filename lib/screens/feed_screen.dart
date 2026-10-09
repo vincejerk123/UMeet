@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../widgets/svg_icon_button.dart';
 import '../theme.dart';
+import '../utils/transitions.dart';
 import '../widgets/post_card.dart';
 import '../widgets/compose_sheet.dart';
 import 'reply_screen.dart';
@@ -29,20 +29,15 @@ class _FeedScreenState extends State<FeedScreen> {
     _loadWithRetry();
   }
 
-  /// Try loading twice: once fast, once after a short delay.
-  /// Handles Supabase cold-start (first request may take 10–30s).
   Future<void> _loadWithRetry() async {
     try {
       await _load(timeout: const Duration(seconds: 20));
     } catch (_) {
-      // First attempt failed → wait 3s and retry once
       await Future.delayed(const Duration(seconds: 3));
       if (!mounted) return;
       try {
         await _load(timeout: const Duration(seconds: 20));
-      } catch (_) {
-        // Both attempts failed — error state is set inside _load()
-      }
+      } catch (_) {}
     }
   }
 
@@ -57,9 +52,7 @@ class _FeedScreenState extends State<FeedScreen> {
           .maybeSingle()
           .timeout(const Duration(seconds: 15));
       if (mounted) setState(() => _myAvatarUrl = data?['avatar_url']);
-    } catch (_) {
-      // silent — avatar is optional
-    }
+    } catch (_) {}
   }
 
   Future<void> _load({Duration? timeout}) async {
@@ -67,7 +60,20 @@ class _FeedScreenState extends State<FeedScreen> {
     try {
       final uid = _client.auth.currentUser!.id;
 
-      // Hidden posts
+      final blockedRows = await _client
+          .from('blocked_users')
+          .select('blocker_id, blocked_id')
+          .or('blocker_id.eq.$uid,blocked_id.eq.$uid')
+          .timeout(timeout ?? const Duration(seconds: 15));
+      final blockedIds = <String>{};
+      for (final row in blockedRows as List) {
+        blockedIds.add(
+          row['blocker_id'] == uid
+              ? row['blocked_id'] as String
+              : row['blocker_id'] as String,
+        );
+      }
+
       final hiddenRows = await _client
           .from('hidden_posts')
           .select('post_id')
@@ -85,6 +91,9 @@ class _FeedScreenState extends State<FeedScreen> {
 
       if (hiddenIds.isNotEmpty) {
         q = q.not('id', 'in', '(${hiddenIds.join(',')})');
+      }
+      if (blockedIds.isNotEmpty) {
+        q = q.not('author_id', 'in', '(${blockedIds.join(',')})');
       }
 
       final data = await q
@@ -116,7 +125,6 @@ class _FeedScreenState extends State<FeedScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // ─── Header ─────────────────────────────
             Container(
               color: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -163,8 +171,6 @@ class _FeedScreenState extends State<FeedScreen> {
                 ],
               ),
             ),
-
-            // ─── Composer ───────────────────────────
             Container(
               color: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -207,22 +213,16 @@ class _FeedScreenState extends State<FeedScreen> {
                       ),
                     ),
                   ),
-                  SvgIconButton(
-                    svgPath: 'assets/icons/send.svg',
-                    size: 22,
-                    color: AppColors.red,
+                  IconButton(
                     onPressed: () async {
                       final ok = await showComposeSheet(context);
                       if (ok == true) _load();
                     },
-                    padding: const EdgeInsets.all(8),
-                    semanticLabel: 'Open composer',
+                    icon: const Icon(Icons.send, color: AppColors.red),
                   ),
                 ],
               ),
             ),
-
-            // ─── Feed ───────────────────────────────
             Expanded(child: _buildBody()),
           ],
         ),
@@ -231,7 +231,6 @@ class _FeedScreenState extends State<FeedScreen> {
   }
 
   Widget _buildBody() {
-    // Still loading (first pass)
     if (_loading) {
       return const Center(
         child: Column(
@@ -247,8 +246,6 @@ class _FeedScreenState extends State<FeedScreen> {
         ),
       );
     }
-
-    // Error occurred — show retry
     if (_error != null) {
       return Center(
         child: Padding(
@@ -288,21 +285,11 @@ class _FeedScreenState extends State<FeedScreen> {
                   ),
                 ),
               ),
-              const SizedBox(height: 12),
-              TextButton(
-                onPressed: () {
-                  setState(() => _loading = true);
-                  _loadWithRetry();
-                },
-                child: const Text('Reload'),
-              ),
             ],
           ),
         ),
       );
     }
-
-    // Empty state
     if (_posts.isEmpty) {
       return RefreshIndicator(
         onRefresh: _load,
@@ -314,8 +301,6 @@ class _FeedScreenState extends State<FeedScreen> {
         ),
       );
     }
-
-    // Posts list
     return RefreshIndicator(
       onRefresh: _load,
       child: ListView.builder(
@@ -325,15 +310,11 @@ class _FeedScreenState extends State<FeedScreen> {
           return PostCard(
             key: ValueKey(p['id']),
             post: p,
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => ReplyScreen(post: p)),
-            ),
+            onTap: () =>
+                Navigator.push(context, smoothOpenRoute(ReplyScreen(post: p))),
             onRemoved: () {
               Future.microtask(() {
-                if (mounted) {
-                  setState(() => _posts.removeWhere((x) => x['id'] == p['id']));
-                }
+                if (mounted) _load();
               });
             },
           );

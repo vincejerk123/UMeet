@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../theme.dart';
+import '../utils/transitions.dart';
 import '../widgets/post_card.dart';
 import 'reply_screen.dart';
 import 'connections_screen.dart';
@@ -110,9 +111,6 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
     }
   }
 
-  // ══════════════════════════════════════════════
-  //  Avatar picker / upload / remove
-  // ══════════════════════════════════════════════
   Future<void> _changeAvatar() async {
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
@@ -245,15 +243,10 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
     final uid = _client.auth.currentUser!.id;
     Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (_) => ConnectionsScreen(userId: uid, mode: mode),
-      ),
+      slideInRoute(ConnectionsScreen(userId: uid, mode: mode)),
     );
   }
 
-  // ══════════════════════════════════════════════
-  //  Build
-  // ══════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -283,7 +276,6 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
                           padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
                           child: Column(
                             children: [
-                              // ─── Avatar ─────────────
                               GestureDetector(
                                 onTap: _uploadingAvatar ? null : _changeAvatar,
                                 child: Stack(
@@ -342,8 +334,6 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
                                 ),
                               ),
                               const SizedBox(height: 12),
-
-                              // ─── Name ───────────────
                               Text(
                                 _profile?['display_name'] ?? 'Display Name',
                                 style: const TextStyle(
@@ -353,8 +343,6 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
                                 ),
                               ),
                               const SizedBox(height: 6),
-
-                              // ─── Year + Program ─────
                               Text(
                                 _yearLabel(_profile?['year_level']),
                                 style: TextStyle(
@@ -372,10 +360,7 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
                                 ),
                                 textAlign: TextAlign.center,
                               ),
-
                               const SizedBox(height: 20),
-
-                              // ─── Stats (4 equal columns) ──
                               Row(
                                 children: [
                                   Expanded(
@@ -402,9 +387,7 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
                                   Expanded(child: _stat('$_likes', 'Likes')),
                                 ],
                               ),
-
                               const SizedBox(height: 20),
-
                               SizedBox(
                                 width: 200,
                                 child: OutlinedButton(
@@ -441,19 +424,11 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
                             authorLabel: 'You',
                             onTap: () => Navigator.push(
                               context,
-                              MaterialPageRoute(
-                                builder: (_) => ReplyScreen(post: p),
-                              ),
+                              smoothOpenRoute(ReplyScreen(post: p)),
                             ),
                             onRemoved: () {
                               Future.microtask(() {
-                                if (mounted) {
-                                  setState(() {
-                                    _posts.removeWhere(
-                                      (x) => x['id'] == p['id'],
-                                    );
-                                  });
-                                }
+                                if (mounted) _load();
                               });
                             },
                           ),
@@ -467,9 +442,6 @@ class _MyProfileScreenState extends State<MyProfileScreen> {
     );
   }
 
-  // ══════════════════════════════════════════════
-  //  Stat helpers (no underline, equal width)
-  // ══════════════════════════════════════════════
   Widget _stat(String value, String label) {
     return Column(
       mainAxisSize: MainAxisSize.min,
